@@ -152,7 +152,7 @@ impl SparseMerklePath {
 
     /// Constructs a borrowing iterator over the nodes in this path.
     /// Starts from the leaf and iterates toward the root (excluding the root).
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = Word> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = Word> + ExactSizeIterator {
         self.into_iter()
     }
 
@@ -316,6 +316,9 @@ pub struct SparseMerklePathIter<'p> {
     /// The depth a `next()` call will get. `next_depth == 0` indicates that the iterator has been
     /// exhausted.
     next_depth: u8,
+
+    /// The depth a `next_back()` call will get.
+    low_depth: u8,
 }
 
 impl Iterator for SparseMerklePathIter<'_> {
@@ -344,13 +347,32 @@ impl Iterator for SparseMerklePathIter<'_> {
 
 impl ExactSizeIterator for SparseMerklePathIter<'_> {
     fn len(&self) -> usize {
-        self.next_depth as usize
+        if self.next_depth < self.low_depth {
+            0
+        } else {
+            (self.next_depth - self.low_depth + 1) as usize
+        }
     }
 }
 
 impl FusedIterator for SparseMerklePathIter<'_> {}
 
-// TODO: impl DoubleEndedIterator.
+impl DoubleEndedIterator for SparseMerklePathIter<'_> {
+    fn next_back(&mut self) -> Option<Word> {
+        if self.next_depth < self.low_depth {
+            return None;
+        }
+
+        let this_depth = NonZero::new(self.low_depth)?;
+        self.low_depth += 1;
+
+        let node = self
+            .path
+            .at_depth(this_depth)
+            .expect("current depth should never exceed the path depth");
+        Some(node)
+    }
+}
 
 impl IntoIterator for SparseMerklePath {
     type IntoIter = SparseMerklePathIter<'static>;
@@ -361,6 +383,7 @@ impl IntoIterator for SparseMerklePath {
         SparseMerklePathIter {
             path: Cow::Owned(self),
             next_depth: tree_depth,
+            low_depth: 1,
         }
     }
 }
@@ -374,6 +397,7 @@ impl<'p> IntoIterator for &'p SparseMerklePath {
         SparseMerklePathIter {
             path: Cow::Borrowed(self),
             next_depth: tree_depth,
+            low_depth: 1,
         }
     }
 }
@@ -683,6 +707,36 @@ mod tests {
         );
         assert_eq!(sparse_path.iter().next(), None);
         assert_eq!(sparse_path.into_iter().next(), None);
+    }
+
+    #[test]
+    fn test_double_ended_iter() {
+        const DEPTH: u8 = 4;
+        let nodes: [Word; DEPTH as usize] = [
+            [1u8, 1, 1, 1].into(),
+            [2u8, 2, 2, 2].into(),
+            [3u8, 3, 3, 3].into(),
+            [4u8, 4, 4, 4].into(),
+        ];
+
+        let sparse_path = SparseMerklePath::from_sized_iter(nodes).unwrap();
+
+        let forward: Vec<Word> = sparse_path.iter().collect();
+        let mut backward_iter = sparse_path.iter();
+        let mut backward: Vec<Word> = Vec::new();
+        while let Some(node) = backward_iter.next_back() {
+            backward.push(node);
+        }
+        backward.reverse();
+
+        assert_eq!(forward, backward);
+
+        let mut mixed_iter = sparse_path.iter();
+        let first = mixed_iter.next().unwrap();
+        let last = mixed_iter.next_back().unwrap();
+        assert_eq!(first, nodes[0]);
+        assert_eq!(last, nodes[DEPTH as usize - 1]);
+        assert_eq!(mixed_iter.len(), DEPTH as usize - 2);
     }
 
     use proptest::prelude::*;
